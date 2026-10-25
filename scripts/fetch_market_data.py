@@ -9,7 +9,11 @@ import argparse
 import json
 import math
 import sys
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import date, timedelta
+from email.utils import parsedate_to_datetime
 
 import yfinance as yf
 import pandas as pd
@@ -98,18 +102,62 @@ def fetch_technical(ticker: str, as_of: date) -> dict:
     }
 
 
-def fetch_news(ticker: str, as_of: date) -> dict:
-    # yfinance always returns latest news regardless of as_of date
-    tk = yf.Ticker(ticker)
-    news = tk.news or []
-
+def _yf_news(symbol: str, limit: int) -> list[dict]:
     items = []
-    for n in news[:15]:
+    for n in (yf.Ticker(symbol).news or [])[:limit]:
+        c = n.get("content", {})
         items.append({
-            "title": n.get("content", {}).get("title", n.get("title", "")),
-            "summary": n.get("content", {}).get("summary", ""),
-            "publisher": n.get("content", {}).get("provider", {}).get("displayName", ""),
+            "title": c.get("title", n.get("title", "")),
+            "summary": c.get("summary", ""),
+            "publisher": c.get("provider", {}).get("displayName", ""),
+            "published": (c.get("pubDate") or "")[:10],
         })
+    return items
+
+
+def _rss_news(symbol: str, limit: int) -> list[dict]:
+    # Yahoo's per-symbol RSS feed; used when yfinance's news endpoint returns
+    # nothing (it has broken more than once while the feed kept working).
+    url = "https://feeds.finance.yahoo.com/rss/2.0/headline?" + urllib.parse.urlencode(
+        {"s": symbol, "region": "US", "lang": "en-US"}
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        root = ET.fromstring(resp.read())
+    items = []
+    for it in root.iter("item"):
+        try:
+            published = parsedate_to_datetime(it.findtext("pubDate", "")).date().isoformat()
+        except (TypeError, ValueError):
+            published = ""
+        link = it.findtext("link", "")
+        items.append({
+            "title": it.findtext("title", ""),
+            "summary": it.findtext("description", ""),
+            "publisher": urllib.parse.urlparse(link).hostname or "",
+            "published": published,
+        })
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _news(symbol: str, limit: int) -> list[dict]:
+    try:
+        items = _yf_news(symbol, limit)
+    except Exception:
+        items = []
+    if not items:
+        try:
+            items = _rss_news(symbol, limit)
+        except Exception:
+            items = []
+    return items
+
+
+def fetch_news(ticker: str, as_of: date) -> dict:
+    # Both sources return the latest news regardless of as_of date
+    items = _news(ticker, 15)
 
     return {
         "ticker": ticker,
@@ -130,20 +178,10 @@ def fetch_macro(as_of: date) -> dict:
     items = []
     seen = set()
     for sym, label in macro_tickers.items():
-        try:
-            news = yf.Ticker(sym).news or []
-            for n in news[:5]:
-                title = n.get("content", {}).get("title", n.get("title", ""))
-                if title and title not in seen:
-                    seen.add(title)
-                    items.append({
-                        "source": label,
-                        "title": title,
-                        "summary": n.get("content", {}).get("summary", ""),
-                        "publisher": n.get("content", {}).get("provider", {}).get("displayName", ""),
-                    })
-        except Exception:
-            continue
+        for n in _news(sym, 5):
+            if n["title"] and n["title"] not in seen:
+                seen.add(n["title"])
+                items.append({"source": label, **n})
 
     return {
         "as_of": as_of.isoformat(),
