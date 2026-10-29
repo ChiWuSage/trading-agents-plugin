@@ -6,7 +6,8 @@ Usage:
   python scripts/fetch_market_data.py --ticker NVDA --type fundamentals --date 2026-05-02
 
 Price bars and news come from Alpaca when APCA_API_KEY_ID and APCA_API_SECRET_KEY
-are set (in the environment or a .env file at the repo root), otherwise from Yahoo
+(or ALPACA_API_KEY and ALPACA_SECRET_KEY) are set (in the environment or a .env
+file at the repo root), otherwise from Yahoo
 Finance. Fundamentals always come from Yahoo; Alpaca has no fundamentals data.
 """
 import argparse
@@ -38,15 +39,23 @@ def _safe(val):
         return None
 
 
+def _alpaca_keys() -> tuple[str | None, str | None]:
+    # Accept both Alpaca's SDK names and the ALPACA_* names people often use.
+    key = os.environ.get("APCA_API_KEY_ID") or os.environ.get("ALPACA_API_KEY")
+    secret = os.environ.get("APCA_API_SECRET_KEY") or os.environ.get("ALPACA_SECRET_KEY")
+    return key, secret
+
+
 def _alpaca_enabled() -> bool:
-    return bool(os.environ.get("APCA_API_KEY_ID") and os.environ.get("APCA_API_SECRET_KEY"))
+    return all(_alpaca_keys())
 
 
 def _alpaca_get(path: str, params: dict) -> dict:
     url = ALPACA_DATA_URL + path + "?" + urllib.parse.urlencode(params)
+    key, secret = _alpaca_keys()
     req = urllib.request.Request(url, headers={
-        "APCA-API-KEY-ID": os.environ["APCA_API_KEY_ID"],
-        "APCA-API-SECRET-KEY": os.environ["APCA_API_SECRET_KEY"],
+        "APCA-API-KEY-ID": key,
+        "APCA-API-SECRET-KEY": secret,
         "Accept": "application/json",
     })
     with urllib.request.urlopen(req, timeout=20) as resp:

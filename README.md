@@ -78,6 +78,8 @@ APCA_API_KEY_ID=your-key-id
 APCA_API_SECRET_KEY=your-secret
 ```
 
+`ALPACA_API_KEY` and `ALPACA_SECRET_KEY` are accepted as alternative names.
+
 | Data | With Alpaca key | Without |
 |------|-----------------|---------|
 | Daily price bars (technical) | Alpaca (SIP feed; set `ALPACA_DATA_FEED=iex` if your plan rejects SIP) | yfinance |
