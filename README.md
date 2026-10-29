@@ -89,6 +89,12 @@ APCA_API_SECRET_KEY=your-secret
 
 If an Alpaca request fails, the script falls back to Yahoo. Each JSON result has a `source` field showing which one it used, and technical results include `alpaca_error` when the fallback happened.
 
+## Additional skills
+
+`skills/` also bundles 68 trading, DeFi and quant skills from [agiprolabs/claude-trading-skills](https://github.com/agiprolabs/claude-trading-skills) (MIT): market data APIs, on-chain analysis, backtesting, risk and position sizing, statistical and ML methods, execution, and tax tooling. Most target crypto and Solana; skills such as `risk-management`, `position-sizing`, `volatility-modeling`, `regime-detection`, `options-pricing` and `backtrader` apply to equities too. Claude picks them up automatically based on the request.
+
+Upstream commit and license: [`third_party/claude-trading-skills/`](third_party/claude-trading-skills/). Execution skills (`raptor-dex`, `jito-bundles`, `solana-tx-building`, `dex-execution`) can submit real on-chain transactions in live mode; they default to demo or simulation.
+
 ## Requirements
 
 - [Claude Code](https://claude.ai/code) with an active subscription
