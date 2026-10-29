@@ -69,6 +69,24 @@ VERDICT: Bull wins on fundamentals — no operational weakness identified. Risk 
          initial with staged second entry near SMA50.
 ```
 
+## Data sources
+
+By default all data comes from Yahoo Finance via yfinance. To use [Alpaca](https://alpaca.markets) for price bars and news instead, set your key in the environment or in a `.env` file at the repo root:
+
+```bash
+APCA_API_KEY_ID=your-key-id
+APCA_API_SECRET_KEY=your-secret
+```
+
+| Data | With Alpaca key | Without |
+|------|-----------------|---------|
+| Daily price bars (technical) | Alpaca (SIP feed; set `ALPACA_DATA_FEED=iex` if your plan rejects SIP) | yfinance |
+| Company news | Alpaca news, filtered to the `--date` you pass | yfinance / Yahoo RSS, always latest |
+| Macro news | Alpaca news on SPY, IEF, GLD, USO | Yahoo news on ^GSPC, ^TNX, GC=F, CL=F |
+| Fundamentals | yfinance (Alpaca has no fundamentals) | yfinance |
+
+If an Alpaca request fails, the script falls back to Yahoo. Each JSON result has a `source` field showing which one it used, and technical results include `alpaca_error` when the fallback happened.
+
 ## Requirements
 
 - [Claude Code](https://claude.ai/code) with an active subscription

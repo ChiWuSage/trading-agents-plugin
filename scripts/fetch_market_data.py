@@ -4,19 +4,30 @@ Usage:
   python scripts/fetch_market_data.py --ticker NVDA --type technical --date 2026-05-02
   python scripts/fetch_market_data.py --ticker NVDA --type news --date 2026-05-02
   python scripts/fetch_market_data.py --ticker NVDA --type fundamentals --date 2026-05-02
+
+Price bars and news come from Alpaca when APCA_API_KEY_ID and APCA_API_SECRET_KEY
+are set (in the environment or a .env file at the repo root), otherwise from Yahoo
+Finance. Fundamentals always come from Yahoo; Alpaca has no fundamentals data.
 """
 import argparse
 import json
 import math
+import os
 import sys
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 
 import yfinance as yf
 import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+ALPACA_DATA_URL = "https://data.alpaca.markets"
 
 
 def _safe(val):
@@ -27,13 +38,71 @@ def _safe(val):
         return None
 
 
-def fetch_technical(ticker: str, as_of: date) -> dict:
+def _alpaca_enabled() -> bool:
+    return bool(os.environ.get("APCA_API_KEY_ID") and os.environ.get("APCA_API_SECRET_KEY"))
+
+
+def _alpaca_get(path: str, params: dict) -> dict:
+    url = ALPACA_DATA_URL + path + "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={
+        "APCA-API-KEY-ID": os.environ["APCA_API_KEY_ID"],
+        "APCA-API-SECRET-KEY": os.environ["APCA_API_SECRET_KEY"],
+        "Accept": "application/json",
+    })
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read())
+
+
+def _alpaca_end(as_of: date) -> str:
+    # Free plans may not query SIP data from the last 15 minutes.
+    end = datetime.combine(as_of + timedelta(days=1), datetime.min.time(), timezone.utc)
+    end = min(end, datetime.now(timezone.utc) - timedelta(minutes=16))
+    return end.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _alpaca_history(ticker: str, start: date, as_of: date) -> pd.DataFrame:
+    params = {
+        "timeframe": "1Day",
+        "start": start.isoformat(),
+        "end": _alpaca_end(as_of),
+        "adjustment": "all",
+        "feed": os.environ.get("ALPACA_DATA_FEED", "sip"),
+        "limit": 10000,
+    }
+    bars = []
+    while True:
+        page = _alpaca_get(f"/v2/stocks/{urllib.parse.quote(ticker)}/bars", params)
+        bars.extend(page.get("bars") or [])
+        if not page.get("next_page_token"):
+            break
+        params["page_token"] = page["next_page_token"]
+    if not bars:
+        return pd.DataFrame()
+    df = pd.DataFrame(bars).rename(columns={"o": "Open", "h": "High", "l": "Low", "c": "Close", "v": "Volume"})
+    df.index = pd.to_datetime(df["t"])
+    return df[["Open", "High", "Low", "Close", "Volume"]]
+
+
+def _history(ticker: str, start: date, as_of: date) -> tuple[pd.DataFrame, str, str | None]:
+    alpaca_error = None
+    if _alpaca_enabled():
+        try:
+            hist = _alpaca_history(ticker, start, as_of)
+            if not hist.empty:
+                return hist, "alpaca", None
+            alpaca_error = "no bars returned"
+        except Exception as e:
+            alpaca_error = str(e)
     end = as_of + timedelta(days=1)
+    hist = yf.Ticker(ticker).history(start=start.isoformat(), end=end.isoformat())
+    return hist, "yahoo", alpaca_error
+
+
+def fetch_technical(ticker: str, as_of: date) -> dict:
     start = as_of - timedelta(days=520)
-    tk = yf.Ticker(ticker)
-    hist = tk.history(start=start.isoformat(), end=end.isoformat())
+    hist, source, alpaca_error = _history(ticker, start, as_of)
     if hist.empty:
-        return {"error": f"No price data for {ticker}"}
+        return {"error": f"No price data for {ticker}", "alpaca_error": alpaca_error}
 
     close = hist["Close"]
     volume = hist["Volume"]
@@ -71,9 +140,10 @@ def fetch_technical(ticker: str, as_of: date) -> dict:
     last = hist.index[-1].date().isoformat()
     prev_close = float(close.iloc[-2]) if len(close) >= 2 else None
 
-    return {
+    result = {
         "ticker": ticker,
         "as_of": as_of.isoformat(),
+        "source": source,
         "last_trading_day": last,
         "price": {
             "current": _safe(close.iloc[-1]),
@@ -100,6 +170,9 @@ def fetch_technical(ticker: str, as_of: date) -> dict:
             for row, val in close.tail(10).items()
         },
     }
+    if alpaca_error:
+        result["alpaca_error"] = alpaca_error
+    return result
 
 
 def _yf_news(symbol: str, limit: int) -> list[dict]:
@@ -142,7 +215,31 @@ def _rss_news(symbol: str, limit: int) -> list[dict]:
     return items
 
 
-def _news(symbol: str, limit: int) -> list[dict]:
+def _alpaca_news(symbol: str, limit: int, as_of: date) -> list[dict]:
+    page = _alpaca_get("/v1beta1/news", {
+        "symbols": symbol,
+        "start": (as_of - timedelta(days=30)).isoformat(),
+        "end": _alpaca_end(as_of),
+        "limit": limit,
+        "sort": "desc",
+    })
+    return [{
+        "title": n.get("headline", ""),
+        "summary": n.get("summary", ""),
+        "publisher": n.get("source", ""),
+        "published": (n.get("created_at") or "")[:10],
+    } for n in page.get("news") or []]
+
+
+def _news(symbol: str, limit: int, as_of: date, alpaca_symbol: str | None = None) -> tuple[list[dict], str]:
+    # Alpaca honours as_of; the Yahoo sources only ever return the latest news.
+    if _alpaca_enabled():
+        try:
+            items = _alpaca_news(alpaca_symbol or symbol, limit, as_of)
+            if items:
+                return items, "alpaca"
+        except Exception:
+            pass
     try:
         items = _yf_news(symbol, limit)
     except Exception:
@@ -152,33 +249,35 @@ def _news(symbol: str, limit: int) -> list[dict]:
             items = _rss_news(symbol, limit)
         except Exception:
             items = []
-    return items
+    return items, "yahoo"
 
 
 def fetch_news(ticker: str, as_of: date) -> dict:
-    # Both sources return the latest news regardless of as_of date
-    items = _news(ticker, 15)
+    items, source = _news(ticker, 15, as_of)
 
     return {
         "ticker": ticker,
         "as_of": as_of.isoformat(),
+        "source": source,
         "news_count": len(items),
         "items": items,
     }
 
 
 def fetch_macro(as_of: date) -> dict:
-    # Pull news from broad market proxies to get global macro context
+    # Pull news from broad market proxies to get global macro context.
+    # Alpaca has no index or futures symbols, so it uses ETF stand-ins.
     macro_tickers = {
-        "^GSPC": "S&P 500",
-        "^TNX": "10Y Treasury Yield",
-        "GC=F": "Gold Futures",
-        "CL=F": "Crude Oil Futures",
+        "^GSPC": ("S&P 500", "SPY"),
+        "^TNX": ("10Y Treasury Yield", "IEF"),
+        "GC=F": ("Gold Futures", "GLD"),
+        "CL=F": ("Crude Oil Futures", "USO"),
     }
     items = []
     seen = set()
-    for sym, label in macro_tickers.items():
-        for n in _news(sym, 5):
+    for sym, (label, alpaca_sym) in macro_tickers.items():
+        news, _ = _news(sym, 5, as_of, alpaca_sym)
+        for n in news:
             if n["title"] and n["title"] not in seen:
                 seen.add(n["title"])
                 items.append({"source": label, **n})
